@@ -143,6 +143,23 @@ async function getServiceName(authToken, serviceId) {
   }
 }
 
+// Check if stylist is scheduled to work on given date(s)
+async function checkStylistSchedule(authToken, employeeId, startDate, endDate) {
+  try {
+    const result = await axios.get(
+      `${CONFIG.API_URL}/employees/schedule?TenantId=${CONFIG.TENANT_ID}&LocationId=${CONFIG.LOCATION_ID}&StartDate=${startDate}&EndDate=${endDate}`,
+      { headers: { 'Authorization': `Bearer ${authToken}` } }
+    );
+    const schedules = result.data?.data || [];
+    // Check if this employee has any scheduled hours in the date range
+    const hasSchedule = schedules.some(s => s.employeeId === employeeId);
+    return hasSchedule;
+  } catch (error) {
+    console.log('Schedule check failed, assuming scheduled:', error.message);
+    return null; // null = couldn't determine, assume scheduled
+  }
+}
+
 app.post('/check-stylist-availability', async (req, res) => {
   const {
     employee_id,
@@ -206,9 +223,10 @@ app.post('/check-stylist-availability', async (req, res) => {
   try {
     const authToken = await getToken();
 
-    const [stylistName, serviceName] = await Promise.all([
+    const [stylistName, serviceName, isScheduled] = await Promise.all([
       getStylistName(authToken, resolvedStylistId),
-      getServiceName(authToken, service_id)
+      getServiceName(authToken, service_id),
+      checkStylistSchedule(authToken, resolvedStylistId, startDate, endDate)
     ]);
 
     // Build ScanServices array - primary service + any add-ons
@@ -255,7 +273,17 @@ app.post('/check-stylist-availability', async (req, res) => {
       }))
     );
 
-    console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}`);
+    console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}, scheduled: ${isScheduled}`);
+
+    // Determine message based on schedule and availability
+    let message;
+    if (openings.length > 0) {
+      message = `Found ${openings.length} available time(s) with ${stylistName}`;
+    } else if (isScheduled === false) {
+      message = `${stylistName} is not on the schedule during this period`;
+    } else {
+      message = `${stylistName} is all booked up during this period`;
+    }
 
     return res.json({
       success: true,
@@ -266,9 +294,8 @@ app.post('/check-stylist-availability', async (req, res) => {
       date_range: { start: startDate, end: endDate },
       available_slots: openings,
       total_openings: openings.length,
-      message: openings.length > 0
-        ? `Found ${openings.length} available time(s) with ${stylistName}`
-        : `No availability found for ${stylistName} during this period`
+      stylist_scheduled: isScheduled,
+      message: message
     });
 
   } catch (error) {
@@ -286,8 +313,8 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '1.1.0',
-    features: ['additional_services support for add-ons']
+    version: '1.2.0',
+    features: ['additional_services support for add-ons', 'stylist_scheduled field']
   });
 });
 
