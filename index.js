@@ -143,20 +143,42 @@ async function getServiceName(authToken, serviceId) {
   }
 }
 
-// Check if stylist is scheduled to work on given date(s)
-async function checkStylistSchedule(authToken, employeeId, startDate, endDate) {
+// Check if stylist is scheduled by seeing if others have availability
+// If no one has availability = shop closed; if others do but not this stylist = not scheduled
+async function checkStylistSchedule(authToken, employeeId, startDate, endDate, serviceId) {
   try {
-    const result = await axios.get(
-      `${CONFIG.API_URL}/employees/schedule?TenantId=${CONFIG.TENANT_ID}&LocationId=${CONFIG.LOCATION_ID}&StartDate=${startDate}&EndDate=${endDate}`,
-      { headers: { 'Authorization': `Bearer ${authToken}` } }
+    // Check if ANY employee has availability (shop open check)
+    const scanRequest = {
+      LocationId: parseInt(CONFIG.LOCATION_ID),
+      TenantId: parseInt(CONFIG.TENANT_ID),
+      ScanDateType: 1,
+      StartDate: startDate,
+      EndDate: endDate,
+      ScanTimeType: 1,
+      StartTime: '00:00',
+      EndTime: '23:59',
+      ScanServices: [{ ServiceId: serviceId }]  // No employee filter = all employees
+    };
+
+    const result = await axios.post(
+      `${CONFIG.API_URL_V2}/scan/openings?TenantId=${CONFIG.TENANT_ID}&LocationId=${CONFIG.LOCATION_ID}`,
+      scanRequest,
+      { headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' } }
     );
-    const schedules = result.data?.data || [];
-    // Check if this employee has any scheduled hours in the date range
-    const hasSchedule = schedules.some(s => s.employeeId === employeeId);
-    return hasSchedule;
+
+    const allOpenings = result.data?.data?.flatMap(item => item.serviceOpenings || []) || [];
+
+    if (allOpenings.length === 0) {
+      // No one has availability - shop might be closed
+      return null; // Can't determine
+    }
+
+    // Check if this specific stylist has ANY slots in the full availability scan
+    const stylistHasSlots = allOpenings.some(s => s.employeeId === employeeId);
+    return stylistHasSlots; // true = scheduled (has slots), false = not on schedule
   } catch (error) {
-    console.log('Schedule check failed, assuming scheduled:', error.message);
-    return null; // null = couldn't determine, assume scheduled
+    console.log('Schedule check failed:', error.message);
+    return null;
   }
 }
 
@@ -226,7 +248,7 @@ app.post('/check-stylist-availability', async (req, res) => {
     const [stylistName, serviceName, isScheduled] = await Promise.all([
       getStylistName(authToken, resolvedStylistId),
       getServiceName(authToken, service_id),
-      checkStylistSchedule(authToken, resolvedStylistId, startDate, endDate)
+      checkStylistSchedule(authToken, resolvedStylistId, startDate, endDate, service_id)
     ]);
 
     // Build ScanServices array - primary service + any add-ons
