@@ -72,6 +72,32 @@ function resolveStylistId(input) {
   return STYLIST_MAP[input.toLowerCase().trim()] || null;
 }
 
+// PRODUCTION Service IDs (Phoenix Encanto) - for add-on resolution
+const SERVICE_MAP = {
+  'haircut_standard': 'f9160450-0b51-4ddc-bcc7-ac150103d5c0',
+  'haircut standard': 'f9160450-0b51-4ddc-bcc7-ac150103d5c0',
+  'standard': 'f9160450-0b51-4ddc-bcc7-ac150103d5c0',
+  'haircut': 'f9160450-0b51-4ddc-bcc7-ac150103d5c0',
+  'haircut_skin_fade': '14000cb7-a5bb-4a26-9f23-b0f3016cc009',
+  'skin_fade': '14000cb7-a5bb-4a26-9f23-b0f3016cc009',
+  'skin fade': '14000cb7-a5bb-4a26-9f23-b0f3016cc009',
+  'fade': '14000cb7-a5bb-4a26-9f23-b0f3016cc009',
+  'long_locks': '721e907d-fdae-41a5-bec4-ac150104229b',
+  'long locks': '721e907d-fdae-41a5-bec4-ac150104229b',
+  'wash': '67c644bc-237f-4794-8b48-ac150106d5ae',
+  'shampoo': '67c644bc-237f-4794-8b48-ac150106d5ae',
+  'grooming': '65ee2a0d-e995-4d8d-a286-ac150106994b',
+  'beard': '65ee2a0d-e995-4d8d-a286-ac150106994b',
+  'beard_trim': '65ee2a0d-e995-4d8d-a286-ac150106994b'
+};
+
+// Helper to resolve service name to ID
+function resolveServiceId(input) {
+  if (!input) return null;
+  if (input.includes('-') && input.length > 30) return input;
+  return SERVICE_MAP[input.toLowerCase().trim()] || null;
+}
+
 let token = null;
 let tokenExpiry = null;
 
@@ -125,7 +151,8 @@ app.post('/check-stylist-availability', async (req, res) => {
     date_start,
     date_end,
     specific_date,
-    location_id
+    location_id,
+    additional_services
   } = req.body;
 
   const locationId = location_id || CONFIG.LOCATION_ID;
@@ -161,10 +188,19 @@ app.post('/check-stylist-availability', async (req, res) => {
     endDate = threeDaysLater.toISOString().split('T')[0];
   }
 
+  // Resolve add-on service IDs if provided
+  let addonServiceIds = [];
+  if (additional_services && Array.isArray(additional_services)) {
+    addonServiceIds = additional_services
+      .map(s => resolveServiceId(s))
+      .filter(s => s !== null);
+  }
+
   console.log('PRODUCTION: Check stylist availability:', {
     stylist: stylist_name || employee_id,
     resolved_id: resolvedStylistId,
-    date_range: `${startDate} to ${endDate}`
+    date_range: `${startDate} to ${endDate}`,
+    addons: addonServiceIds.length > 0 ? addonServiceIds : 'none'
   });
 
   try {
@@ -175,6 +211,12 @@ app.post('/check-stylist-availability', async (req, res) => {
       getServiceName(authToken, service_id)
     ]);
 
+    // Build ScanServices array - primary service + any add-ons
+    const scanServices = [{ ServiceId: service_id, EmployeeIds: [resolvedStylistId] }];
+    for (const addonId of addonServiceIds) {
+      scanServices.push({ ServiceId: addonId, EmployeeIds: [resolvedStylistId] });
+    }
+
     const scanRequest = {
       LocationId: parseInt(locationId),
       TenantId: parseInt(CONFIG.TENANT_ID),
@@ -184,10 +226,7 @@ app.post('/check-stylist-availability', async (req, res) => {
       ScanTimeType: 1,
       StartTime: '00:00',
       EndTime: '23:59',
-      ScanServices: [{
-        ServiceId: service_id,
-        EmployeeIds: [resolvedStylistId]
-      }]
+      ScanServices: scanServices
     };
 
     const result = await axios.post(
@@ -246,7 +285,9 @@ app.get('/health', (req, res) => {
     status: 'ok',
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
-    service: 'Check Stylist Availability'
+    service: 'Check Stylist Availability',
+    version: '1.1.0',
+    features: ['additional_services support for add-ons']
   });
 });
 
