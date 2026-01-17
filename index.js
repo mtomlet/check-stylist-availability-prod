@@ -143,12 +143,6 @@ async function getServiceName(authToken, serviceId) {
   }
 }
 
-// Check if shop is closed on this date (Sundays = closed for Phoenix Encanto)
-function isShopClosed(dateStr) {
-  const date = new Date(dateStr + 'T12:00:00');
-  return date.getDay() === 0; // Sunday = 0
-}
-
 app.post('/check-stylist-availability', async (req, res) => {
   const {
     employee_id,
@@ -217,9 +211,6 @@ app.post('/check-stylist-availability', async (req, res) => {
       getServiceName(authToken, service_id)
     ]);
 
-    // Simple check: if Sunday, shop is closed
-    const shopClosed = isShopClosed(startDate);
-
     // Build ScanServices array - primary service + any add-ons
     const scanServices = [{ ServiceId: service_id, EmployeeIds: [resolvedStylistId] }];
     for (const addonId of addonServiceIds) {
@@ -264,21 +255,7 @@ app.post('/check-stylist-availability', async (req, res) => {
       }))
     );
 
-    console.log(`PRODUCTION: Found ${openings.length} slots for ${stylistName}, shopClosed: ${shopClosed}`);
-
-    // Determine message based on availability
-    let message;
-    let stylistScheduled = null; // null = unknown
-    if (openings.length > 0) {
-      message = `Found ${openings.length} available time(s) with ${stylistName}`;
-      stylistScheduled = true;
-    } else if (shopClosed) {
-      message = `We're closed on Sundays`;
-      stylistScheduled = false;
-    } else {
-      // Can't determine if booked vs not scheduled - default to "not available"
-      message = `${stylistName} doesn't have availability during this period`;
-    }
+    console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}`);
 
     return res.json({
       success: true,
@@ -289,9 +266,9 @@ app.post('/check-stylist-availability', async (req, res) => {
       date_range: { start: startDate, end: endDate },
       available_slots: openings,
       total_openings: openings.length,
-      shop_closed: shopClosed,
-      stylist_scheduled: stylistScheduled,
-      message: message
+      message: openings.length > 0
+        ? `Found ${openings.length} available time(s) with ${stylistName}`
+        : `No availability found for ${stylistName} during this period`
     });
 
   } catch (error) {
@@ -309,8 +286,8 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '1.2.0',
-    features: ['additional_services support for add-ons', 'stylist_scheduled field']
+    version: '1.1.0',
+    features: ['additional_services support for add-ons']
   });
 });
 
