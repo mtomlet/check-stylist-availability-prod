@@ -143,43 +143,10 @@ async function getServiceName(authToken, serviceId) {
   }
 }
 
-// Check if stylist is scheduled by seeing if others have availability
-// If no one has availability = shop closed; if others do but not this stylist = not scheduled
-async function checkStylistSchedule(authToken, employeeId, startDate, endDate, serviceId) {
-  try {
-    // Check if ANY employee has availability (shop open check)
-    const scanRequest = {
-      LocationId: parseInt(CONFIG.LOCATION_ID),
-      TenantId: parseInt(CONFIG.TENANT_ID),
-      ScanDateType: 1,
-      StartDate: startDate,
-      EndDate: endDate,
-      ScanTimeType: 1,
-      StartTime: '00:00',
-      EndTime: '23:59',
-      ScanServices: [{ ServiceId: serviceId }]  // No employee filter = all employees
-    };
-
-    const result = await axios.post(
-      `${CONFIG.API_URL_V2}/scan/openings?TenantId=${CONFIG.TENANT_ID}&LocationId=${CONFIG.LOCATION_ID}`,
-      scanRequest,
-      { headers: { 'Authorization': `Bearer ${authToken}`, 'Content-Type': 'application/json' } }
-    );
-
-    const allOpenings = result.data?.data?.flatMap(item => item.serviceOpenings || []) || [];
-
-    if (allOpenings.length === 0) {
-      // No one has availability - shop might be closed
-      return null; // Can't determine
-    }
-
-    // Check if this specific stylist has ANY slots in the full availability scan
-    const stylistHasSlots = allOpenings.some(s => s.employeeId === employeeId);
-    return stylistHasSlots; // true = scheduled (has slots), false = not on schedule
-  } catch (error) {
-    console.log('Schedule check failed:', error.message);
-    return null;
-  }
+// Check if shop is closed on this date (Sundays = closed for Phoenix Encanto)
+function isShopClosed(dateStr) {
+  const date = new Date(dateStr + 'T12:00:00');
+  return date.getDay() === 0; // Sunday = 0
 }
 
 app.post('/check-stylist-availability', async (req, res) => {
@@ -245,11 +212,13 @@ app.post('/check-stylist-availability', async (req, res) => {
   try {
     const authToken = await getToken();
 
-    const [stylistName, serviceName, isScheduled] = await Promise.all([
+    const [stylistName, serviceName] = await Promise.all([
       getStylistName(authToken, resolvedStylistId),
-      getServiceName(authToken, service_id),
-      checkStylistSchedule(authToken, resolvedStylistId, startDate, endDate, service_id)
+      getServiceName(authToken, service_id)
     ]);
+
+    // Simple check: if Sunday, shop is closed
+    const shopClosed = isShopClosed(startDate);
 
     // Build ScanServices array - primary service + any add-ons
     const scanServices = [{ ServiceId: service_id, EmployeeIds: [resolvedStylistId] }];
@@ -295,16 +264,20 @@ app.post('/check-stylist-availability', async (req, res) => {
       }))
     );
 
-    console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}, scheduled: ${isScheduled}`);
+    console.log(`PRODUCTION: Found ${openings.length} slots for ${stylistName}, shopClosed: ${shopClosed}`);
 
-    // Determine message based on schedule and availability
+    // Determine message based on availability
     let message;
+    let stylistScheduled = null; // null = unknown
     if (openings.length > 0) {
       message = `Found ${openings.length} available time(s) with ${stylistName}`;
-    } else if (isScheduled === false) {
-      message = `${stylistName} is not on the schedule during this period`;
+      stylistScheduled = true;
+    } else if (shopClosed) {
+      message = `We're closed on Sundays`;
+      stylistScheduled = false;
     } else {
-      message = `${stylistName} is all booked up during this period`;
+      // Can't determine if booked vs not scheduled - default to "not available"
+      message = `${stylistName} doesn't have availability during this period`;
     }
 
     return res.json({
@@ -316,7 +289,8 @@ app.post('/check-stylist-availability', async (req, res) => {
       date_range: { start: startDate, end: endDate },
       available_slots: openings,
       total_openings: openings.length,
-      stylist_scheduled: isScheduled,
+      shop_closed: shopClosed,
+      stylist_scheduled: stylistScheduled,
       message: message
     });
 
