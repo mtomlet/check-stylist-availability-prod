@@ -101,6 +101,72 @@ function resolveServiceId(input) {
 let token = null;
 let tokenExpiry = null;
 
+// ============================================
+// DATE FORMATTING HELPERS (Option B fix)
+// These ensure the LLM never has to do date math
+// ============================================
+
+const DAYS_OF_WEEK = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+const MONTHS = ['January', 'February', 'March', 'April', 'May', 'June',
+                'July', 'August', 'September', 'October', 'November', 'December'];
+
+function getOrdinalSuffix(day) {
+  if (day > 3 && day < 21) return 'th';
+  switch (day % 10) {
+    case 1: return 'st';
+    case 2: return 'nd';
+    case 3: return 'rd';
+    default: return 'th';
+  }
+}
+
+function formatDateParts(dateString) {
+  // Parse date string like "2026-01-21" or "2026-01-21T09:00:00"
+  // Use UTC methods to avoid timezone issues on Railway servers
+  const date = new Date(dateString + (dateString.includes('T') ? '' : 'T12:00:00'));
+
+  const dayOfWeek = DAYS_OF_WEEK[date.getUTCDay()];
+  const month = MONTHS[date.getUTCMonth()];
+  const dayNum = date.getUTCDate();
+  const dayWithSuffix = `${dayNum}${getOrdinalSuffix(dayNum)}`;
+
+  return {
+    day_of_week: dayOfWeek,
+    formatted_date: `${month} ${dayWithSuffix}`,
+    formatted_full_date: `${dayOfWeek}, ${month} ${dayWithSuffix}`
+  };
+}
+
+function formatTime(timeString) {
+  // Parse time directly from string to avoid timezone issues
+  // Input: "2026-01-21T09:00:00.0000000" or "2026-01-21T09:00:00"
+  const timePart = timeString.split('T')[1];
+  if (!timePart) return 'Time unavailable';
+
+  const [hourStr, minStr] = timePart.split(':');
+  let hours = parseInt(hourStr, 10);
+  const minutes = parseInt(minStr, 10);
+
+  const ampm = hours >= 12 ? 'PM' : 'AM';
+  hours = hours % 12;
+  hours = hours ? hours : 12; // 0 should be 12
+  const minutesStr = minutes < 10 ? '0' + minutes : minutes;
+  return `${hours}:${minutesStr} ${ampm}`;
+}
+
+function detectGap(searchStartDate, firstAvailableDate) {
+  // Compare if first available is different from search start
+  const searchStart = searchStartDate.split('T')[0];
+  const firstAvail = firstAvailableDate.split('T')[0];
+  return searchStart !== firstAvail;
+}
+
+function buildGapMessage(searchStartDate, firstAvailableDate) {
+  const searchParts = formatDateParts(searchStartDate);
+  const firstParts = formatDateParts(firstAvailableDate);
+  return `No availability on ${searchParts.formatted_full_date}. First opening is ${firstParts.formatted_full_date}.`;
+}
+
 async function getToken() {
   if (token && tokenExpiry && Date.now() < tokenExpiry - 300000) {
     return token;
@@ -242,20 +308,56 @@ app.post('/check-stylist-availability', async (req, res) => {
 
     const rawData = result.data?.data || [];
     const openings = rawData.flatMap(item =>
-      (item.serviceOpenings || []).map(slot => ({
-        startTime: slot.startTime,
-        endTime: slot.endTime,
-        date: slot.date,
-        employeeId: slot.employeeId,
-        employeeFirstName: slot.employeeFirstName,
-        employeeDisplayName: slot.employeeDisplayName,
-        serviceId: slot.serviceId,
-        serviceName: slot.serviceName,
-        price: slot.employeePrice
-      }))
+      (item.serviceOpenings || []).map(slot => {
+        const dateParts = formatDateParts(slot.startTime);
+        const formattedTime = formatTime(slot.startTime);
+        return {
+          startTime: slot.startTime,
+          endTime: slot.endTime,
+          date: slot.date,
+          employeeId: slot.employeeId,
+          employeeFirstName: slot.employeeFirstName,
+          employeeDisplayName: slot.employeeDisplayName,
+          serviceId: slot.serviceId,
+          serviceName: slot.serviceName,
+          price: slot.employeePrice,
+          // NEW: Pre-formatted date fields so LLM doesn't do date math
+          day_of_week: dateParts.day_of_week,
+          formatted_date: dateParts.formatted_date,
+          formatted_time: formattedTime,
+          formatted_full: `${dateParts.formatted_full_date} at ${formattedTime}`
+        };
+      })
     );
 
     console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}`);
+
+    // Build first_available summary and gap detection
+    let firstAvailable = null;
+    let gapDetected = false;
+    let gapMessage = null;
+
+    if (openings.length > 0) {
+      const firstSlot = openings[0];
+      const firstDateParts = formatDateParts(firstSlot.startTime);
+      const firstTime = formatTime(firstSlot.startTime);
+
+      firstAvailable = {
+        date: firstSlot.startTime.split('T')[0],
+        day_of_week: firstDateParts.day_of_week,
+        formatted_date: firstDateParts.formatted_date,
+        formatted_full_date: firstDateParts.formatted_full_date,
+        time: firstTime,
+        formatted_full: `${firstDateParts.formatted_full_date} at ${firstTime}`
+      };
+
+      // Check if there's a gap between search start and first available
+      gapDetected = detectGap(startDate, firstSlot.startTime);
+      if (gapDetected) {
+        gapMessage = buildGapMessage(startDate, firstSlot.startTime);
+        console.log(`PRODUCTION: Gap detected - ${gapMessage}`);
+      }
+    }
 
     return res.json({
       success: true,
@@ -264,6 +366,12 @@ app.post('/check-stylist-availability', async (req, res) => {
       service_name: serviceName,
       service_id: service_id,
       date_range: { start: startDate, end: endDate },
+      // NEW: First available summary for easy LLM consumption
+      first_available: firstAvailable,
+      // NEW: Gap detection - tells LLM if search date had no availability
+      search_started_from: startDate,
+      gap_detected: gapDetected,
+      gap_message: gapMessage,
       available_slots: openings,
       total_openings: openings.length,
       message: openings.length > 0
@@ -286,8 +394,13 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '1.1.0',
-    features: ['additional_services support for add-ons']
+    version: '1.2.0',
+    features: [
+      'additional_services support for add-ons',
+      'formatted date fields (day_of_week, formatted_date, formatted_time)',
+      'first_available summary',
+      'gap_detected and gap_message for date mismatches'
+    ]
   });
 });
 
