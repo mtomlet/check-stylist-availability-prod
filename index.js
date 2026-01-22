@@ -321,7 +321,7 @@ app.post('/check-stylist-availability', async (req, res) => {
           serviceId: slot.serviceId,
           serviceName: slot.serviceName,
           price: slot.employeePrice,
-          // NEW: Pre-formatted date fields so LLM doesn't do date math
+          // Pre-formatted date fields so LLM doesn't do date math
           day_of_week: dateParts.day_of_week,
           formatted_date: dateParts.formatted_date,
           formatted_time: formattedTime,
@@ -394,7 +394,7 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '1.2.0',
+    version: '1.3.0',
     features: [
       'additional_services support for add-ons',
       'formatted date fields (day_of_week, formatted_date, formatted_time)',
