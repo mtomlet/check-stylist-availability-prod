@@ -283,52 +283,72 @@ app.post('/check-stylist-availability', async (req, res) => {
       scanServices.push({ ServiceId: addonId, EmployeeIds: [resolvedStylistId] });
     }
 
-    const scanRequest = {
-      LocationId: parseInt(locationId),
-      TenantId: parseInt(CONFIG.TENANT_ID),
-      ScanDateType: 1,
-      StartDate: startDate,
-      EndDate: endDate,
-      ScanTimeType: 1,
-      StartTime: '00:00',
-      EndTime: '23:59',
-      ScanServices: scanServices
-    };
+    // Meevo V2 API has 8-slot limit per request
+    // Make two requests (morning + afternoon) and combine to get ALL slots
+    async function scanTimeRange(startTime, endTime) {
+      const scanRequest = {
+        LocationId: parseInt(locationId),
+        TenantId: parseInt(CONFIG.TENANT_ID),
+        ScanDateType: 1,
+        StartDate: startDate,
+        EndDate: endDate,
+        ScanTimeType: 1,
+        StartTime: startTime,
+        EndTime: endTime,
+        ScanServices: scanServices
+      };
 
-    const result = await axios.post(
-      `${CONFIG.API_URL_V2}/scan/openings?TenantId=${CONFIG.TENANT_ID}&LocationId=${locationId}`,
-      scanRequest,
-      {
-        headers: {
-          'Authorization': `Bearer ${authToken}`,
-          'Content-Type': 'application/json'
+      const result = await axios.post(
+        `${CONFIG.API_URL_V2}/scan/openings?TenantId=${CONFIG.TENANT_ID}&LocationId=${locationId}`,
+        scanRequest,
+        {
+          headers: {
+            'Authorization': `Bearer ${authToken}`,
+            'Content-Type': 'application/json'
+          }
         }
-      }
-    );
+      );
 
-    const rawData = result.data?.data || [];
-    const openings = rawData.flatMap(item =>
-      (item.serviceOpenings || []).map(slot => {
-        const dateParts = formatDateParts(slot.startTime);
-        const formattedTime = formatTime(slot.startTime);
-        return {
-          startTime: slot.startTime,
-          endTime: slot.endTime,
-          date: slot.date,
-          employeeId: slot.employeeId,
-          employeeFirstName: slot.employeeFirstName,
-          employeeDisplayName: slot.employeeDisplayName,
-          serviceId: slot.serviceId,
-          serviceName: slot.serviceName,
-          price: slot.employeePrice,
-          // Pre-formatted date fields so LLM doesn't do date math
-          day_of_week: dateParts.day_of_week,
-          formatted_date: dateParts.formatted_date,
-          formatted_time: formattedTime,
-          formatted_full: `${dateParts.formatted_full_date} at ${formattedTime}`
-        };
-      })
-    );
+      return (result.data?.data || []).flatMap(item => item.serviceOpenings || []);
+    }
+
+    // Scan morning and afternoon in parallel
+    const [morningSlots, afternoonSlots] = await Promise.all([
+      scanTimeRange('00:00', '14:00'),
+      scanTimeRange('14:00', '23:59')
+    ]);
+
+    // Combine and deduplicate by startTime
+    const seenTimes = new Set();
+    const allSlots = [...morningSlots, ...afternoonSlots].filter(slot => {
+      if (seenTimes.has(slot.startTime)) return false;
+      seenTimes.add(slot.startTime);
+      return true;
+    });
+
+    // Sort by start time
+    allSlots.sort((a, b) => new Date(a.startTime) - new Date(b.startTime));
+
+    const openings = allSlots.map(slot => {
+      const dateParts = formatDateParts(slot.startTime);
+      const formattedTime = formatTime(slot.startTime);
+      return {
+        startTime: slot.startTime,
+        endTime: slot.endTime,
+        date: slot.date,
+        employeeId: slot.employeeId,
+        employeeFirstName: slot.employeeFirstName,
+        employeeDisplayName: slot.employeeDisplayName,
+        serviceId: slot.serviceId,
+        serviceName: slot.serviceName,
+        price: slot.employeePrice,
+        // Pre-formatted date fields so LLM doesn't do date math
+        day_of_week: dateParts.day_of_week,
+        formatted_date: dateParts.formatted_date,
+        formatted_time: formattedTime,
+        formatted_full: `${dateParts.formatted_full_date} at ${formattedTime}`
+      };
+    });
 
     console.log(`PRODUCTION: Found ${openings.length} available slots for ${stylistName}`);
 
@@ -394,12 +414,13 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '1.3.0',
+    version: '1.4.0',
     features: [
       'additional_services support for add-ons',
       'formatted date fields (day_of_week, formatted_date, formatted_time)',
       'first_available summary',
-      'gap_detected and gap_message for date mismatches'
+      'gap_detected and gap_message for date mismatches',
+      'full slot retrieval (morning + afternoon scan to bypass 8-slot API limit)'
     ]
   });
 });
