@@ -306,7 +306,16 @@ app.post('/check-stylist-availability', async (req, res) => {
     }
 
     // Meevo V2 API has 8-slot limit per request
-    // Make two requests (morning + afternoon) and combine to get ALL slots
+    // Use smaller 3-hour time windows to ensure we capture ALL availability
+    const TIME_WINDOWS = [
+      { start: '00:00', end: '09:00' },
+      { start: '09:00', end: '12:00' },
+      { start: '12:00', end: '15:00' },
+      { start: '15:00', end: '18:00' },
+      { start: '18:00', end: '21:00' },
+      { start: '21:00', end: '23:59' }
+    ];
+
     async function scanTimeRange(startTime, endTime) {
       const scanRequest = {
         LocationId: parseInt(locationId),
@@ -334,15 +343,14 @@ app.post('/check-stylist-availability', async (req, res) => {
       return (result.data?.data || []).flatMap(item => item.serviceOpenings || []);
     }
 
-    // Scan morning and afternoon in parallel
-    const [morningSlots, afternoonSlots] = await Promise.all([
-      scanTimeRange('00:00', '14:00'),
-      scanTimeRange('14:00', '23:59')
-    ]);
+    // Scan all time windows in parallel for complete coverage
+    const windowResults = await Promise.all(
+      TIME_WINDOWS.map(w => scanTimeRange(w.start, w.end))
+    );
 
-    // Combine and deduplicate by startTime
+    // Combine all results and deduplicate by startTime
     const seenTimes = new Set();
-    const allSlots = [...morningSlots, ...afternoonSlots].filter(slot => {
+    const allSlots = windowResults.flat().filter(slot => {
       if (seenTimes.has(slot.startTime)) return false;
       seenTimes.add(slot.startTime);
       return true;
@@ -436,14 +444,14 @@ app.get('/health', (req, res) => {
     environment: 'PRODUCTION',
     location: 'Phoenix Encanto',
     service: 'Check Stylist Availability',
-    version: '2.0.0',
+    version: '2.1.0',
     features: [
       'DYNAMIC active employee fetching (1-hour cache)',
       'additional_services support for add-ons',
       'formatted date fields (day_of_week, formatted_date, formatted_time)',
       'first_available summary',
       'gap_detected and gap_message for date mismatches',
-      'full slot retrieval (morning + afternoon scan to bypass 8-slot API limit)'
+      'full slot retrieval (6 parallel 3-hour scans to bypass 8-slot API limit)'
     ],
     stylists: 'dynamic (fetched from Meevo API)'
   });
